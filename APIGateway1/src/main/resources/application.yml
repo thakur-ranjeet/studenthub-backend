@@ -1,0 +1,114 @@
+server:
+  port: 8083
+
+spring:
+  application:
+    name: API-GATEWAY1
+
+  cloud:
+    gateway:
+      routes:
+        - id: STUDENT-SERVICE
+          uri: ${STUDENT_SERVICE_URL:http://localhost:8081}
+          predicates:
+            - Path=/api/v1/students/**
+          filters:
+            - AuthenticationFilter
+
+        - id: COURSE-SERVICE
+          uri: ${COURSE_SERVICE_URL:http://localhost:8082}
+          predicates:
+            - Path=/api/v1/courses/**
+          filters:
+            - AuthenticationFilter
+
+        - id: ORDER-SERVICE
+          uri: ${ORDER_SERVICE_URL:http://localhost:8085}
+          predicates:
+            - Path=/api/v1/shop/**
+          filters:
+            - AuthenticationFilter
+
+        # Chat assistant and AI features (both are served by ChatbotService). Needs a valid JWT.
+        - id: CHATBOT-SERVICE
+          uri: ${CHATBOT_SERVICE_URL:http://localhost:8086}
+          predicates:
+            - Path=/api/v1/chat/**,/api/v1/ai/**
+          filters:
+            - AuthenticationFilter
+
+        # Razorpay calls this by itself, so there is no JWT filter. The X-Razorpay-Signature check inside OrderService is the lock.
+        - id: ORDER-WEBHOOK
+          uri: ${ORDER_SERVICE_URL:http://localhost:8085}
+          predicates:
+            - Path=/api/v1/webhooks/**
+
+        - id: LOCAL-AUTH-SERVICE
+          uri: forward:///
+          predicates:
+            - Path=/api/v1/auth/**
+
+      globalcors:
+        corsConfigurations:
+          '[/**]':
+            allowedOrigins: "${CORS_ALLOWED_ORIGIN:http://localhost:3000}"
+            allowedHeaders: "*"
+            allowedMethods:
+              - GET
+              - POST
+              - PUT
+              - PATCH
+              - DELETE
+              - OPTIONS
+
+  # E-mail for the password reset link.
+  mail:
+    host: ${MAIL_HOST:smtp.gmail.com}
+    port: ${MAIL_PORT:587}
+    username: ${MAIL_USERNAME}
+    password: ${MAIL_PASSWORD}
+    properties:
+      mail.smtp.auth: true
+      mail.smtp.starttls.enable: true
+      mail.smtp.connectiontimeout: 5000
+      mail.smtp.timeout: 5000
+      mail.smtp.writetimeout: 5000
+
+  # Merged the datasource configuration here
+  datasource:
+    url: jdbc:mysql://${DB_HOST:localhost}:3306/microservices_auth_db
+    username: root
+    password: ${DB_PASSWORD}
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.MySQLDialect
+
+eureka:
+  client:
+    serviceUrl:
+      defaultZone: http://${EUREKA_HOST:localhost}:8762/eureka/
+  instance:
+    prefer-ip-address: true
+
+# Secret used to sign login tokens. Set the JWT_SECRET environment variable.
+jwt:
+  secret: ${JWT_SECRET}
+
+app:
+  mail:
+    enabled: ${MAIL_ENABLED:true}
+    from: ${MAIL_FROM:${MAIL_USERNAME}}
+  frontend:
+    url: ${FRONTEND_URL:http://localhost:3000}
+  reset:
+    token-minutes: 30
+
+# do not let /actuator/health try to reach the mail server
+management:
+  health:
+    mail:
+      enabled: false

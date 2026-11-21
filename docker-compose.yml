@@ -1,0 +1,168 @@
+# Production stack: docker compose up -d --build
+# Reads secrets from the ".env" file next to this file (see .env.example).
+# Only Caddy (ports 80/443) is reachable from the internet. Everything else stays on the private network.
+
+x-common: &common
+  restart: unless-stopped
+  networks: [appnet]
+
+x-service-env: &service-env
+  EUREKA_HOST: eureka
+  DB_HOST: mysql
+  DB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+  KAFKA_BOOTSTRAP: kafka:9092
+  REDIS_HOST: redis
+  JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+  STUDENT_SERVICE_URL: http://student-service:8081
+  COURSE_SERVICE_URL: http://course-service:8082
+  ORDER_SERVICE_URL: http://order-service:8085
+  CHATBOT_SERVICE_URL: http://chatbot-service:8086
+
+services:
+  caddy:
+    <<: *common
+    image: caddy:2
+    ports: ["80:80", "443:443"]
+    environment:
+      API_DOMAIN: ${API_DOMAIN:?set API_DOMAIN in .env}
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [gateway]
+
+  mysql:
+    <<: *common
+    image: mysql:8.0
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci --innodb-buffer-pool-size=128M
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./mysql-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    <<: *common
+    image: redis:7.2-alpine
+    command: redis-server --maxmemory 64mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      retries: 10
+
+  kafka:
+    <<: *common
+    image: apache/kafka:3.8.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_HEAP_OPTS: -Xms256m -Xmx384m
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+
+  eureka:
+    <<: *common
+    build: ./EurekaServer1
+    environment:
+      JAVA_TOOL_OPTIONS: -Xmx160m
+
+  student-service:
+    <<: *common
+    build: ./StudentAuthenticationService
+    environment:
+      <<: *service-env
+      EUREKA_INSTANCE_HOSTNAME: student-service
+      JAVA_TOOL_OPTIONS: -Xmx256m
+    depends_on:
+      mysql: {condition: service_healthy}
+      eureka: {condition: service_started}
+      kafka: {condition: service_started}
+
+  course-service:
+    <<: *common
+    build: ./CourseService
+    environment:
+      <<: *service-env
+      EUREKA_INSTANCE_HOSTNAME: course-service
+      JAVA_TOOL_OPTIONS: -Xmx256m
+    depends_on:
+      mysql: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      eureka: {condition: service_started}
+      kafka: {condition: service_started}
+
+  notification-service:
+    <<: *common
+    build: ./NotificationService
+    environment:
+      <<: *service-env
+      EUREKA_INSTANCE_HOSTNAME: notification-service
+      JAVA_TOOL_OPTIONS: -Xmx160m
+    depends_on:
+      eureka: {condition: service_started}
+      kafka: {condition: service_started}
+
+  order-service:
+    <<: *common
+    build: ./OrderService/OrderService
+    environment:
+      <<: *service-env
+      EUREKA_INSTANCE_HOSTNAME: order-service
+      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID:?set RAZORPAY_KEY_ID in .env}
+      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET:?set RAZORPAY_KEY_SECRET in .env}
+      RAZORPAY_WEBHOOK_SECRET: ${RAZORPAY_WEBHOOK_SECRET:-}
+      JAVA_TOOL_OPTIONS: -Xmx256m
+    depends_on:
+      mysql: {condition: service_healthy}
+      eureka: {condition: service_started}
+
+  chatbot-service:
+    <<: *common
+    build: ./ChatbotService
+    environment:
+      <<: *service-env
+      EUREKA_INSTANCE_HOSTNAME: chatbot-service
+      AI_PROVIDER: ${AI_PROVIDER:-gemini}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      JAVA_TOOL_OPTIONS: -Xmx256m
+    depends_on:
+      eureka: {condition: service_started}
+
+  gateway:
+    <<: *common
+    build: ./APIGateway1
+    environment:
+      <<: *service-env
+      CORS_ALLOWED_ORIGIN: ${CORS_ALLOWED_ORIGIN:?set CORS_ALLOWED_ORIGIN in .env}
+      FRONTEND_URL: ${FRONTEND_URL:?set FRONTEND_URL in .env}
+      MAIL_USERNAME: ${MAIL_USERNAME:?set MAIL_USERNAME in .env}
+      MAIL_PASSWORD: ${MAIL_PASSWORD:?set MAIL_PASSWORD in .env}
+      JAVA_TOOL_OPTIONS: -Xmx256m
+    depends_on:
+      mysql: {condition: service_healthy}
+      eureka: {condition: service_started}
+
+networks:
+  appnet:
+
+volumes:
+  mysql_data:
+  kafka_data:
+  caddy_data:
+  caddy_config:
